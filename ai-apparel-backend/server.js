@@ -1,19 +1,42 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const Design = require('./models/Design');
 require('dotenv').config();
 
 const app = express();
 
 // Middleware
 app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
 
-// Increase timeout for AI generation routes (HuggingFace cold starts can take 30s+)
+// Request Logger (Observability for incoming API calls)
+app.use((req, res, next) => {
+  console.log(`📡 [${req.method}] ${req.originalUrl}`);
+  next();
+});
+
+// Timeout extension for AI generation routes
 app.use('/api/design', (req, res, next) => {
   req.setTimeout(180000); // 3 minutes
   res.setTimeout(180000);
   next();
+});
+
+// ============================================================================
+// STOREFRONT FEED ENDPOINT (Direct route registration)
+// ============================================================================
+app.get('/api/design/all', async (req, res) => {
+  try {
+    console.log('📦 Fetching published designs from MongoDB for Storefront...');
+    const designs = await Design.find().sort({ createdAt: -1 });
+    console.log(`   ✓ Found ${designs.length} published designs`);
+    res.json(designs);
+  } catch (error) {
+    console.error('❌ Storefront Fetch Error:', error);
+    res.status(500).json({ error: 'Failed to fetch storefront designs.' });
+  }
 });
 
 // Connect to MongoDB
@@ -21,14 +44,14 @@ mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('✅ Database Connected Successfully'))
   .catch((err) => console.log('❌ Database Connection Failed:', err));
 
-// Import Routes
+// Import Feature Routers
 const authRoutes = require('./routes/auth');
-const designRoutes = require('./routes/design'); // <-- NEW
+const designRoutes = require('./routes/design');
 
 app.use('/api/auth', authRoutes);
-app.use('/api/design', designRoutes); // <-- NEW
+app.use('/api/design', designRoutes);
 
-// A simple test route
+// Health check route
 app.get('/', (req, res) => {
   res.send('AI Apparel API is running!');
 });
