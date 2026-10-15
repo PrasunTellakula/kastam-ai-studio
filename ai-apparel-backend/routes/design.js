@@ -5,279 +5,88 @@ require('dotenv').config();
 
 const router = express.Router();
 
-// Lazy-load the background removal module
-let removeBackgroundFn = null;
-async function getRemoveBackground() {
-  if (!removeBackgroundFn) {
-    const mod = await import('@imgly/background-removal-node');
-    removeBackgroundFn = mod.removeBackground;
-  }
-  return removeBackgroundFn;
-}
-
 // ============================================================================
-// STAGE 1: PROMPT INTENT CLASSIFIER
+// STAGE 1 & 2: GROQ LLM ART DIRECTOR (Extracts clean text & prevents letterboxing)
 // ============================================================================
-const SCENE_KEYWORDS = [
-  'sunrise', 'sunset', 'landscape', 'skyline', 'cityscape', 'horizon',
-  'ocean', 'mountain', 'forest', 'beach', 'desert', 'underwater', 'space',
-  'galaxy', 'nebula', 'aurora', 'northern lights', 'night sky', 'starry',
-  'weather', 'storm', 'rain', 'snow', 'clouds', 'atmosphere', 'panorama',
-  'valley', 'canyon', 'waterfall', 'river', 'lake', 'island', 'volcano',
-  'field', 'meadow', 'garden', 'jungle', 'swamp', 'cave', 'ruins',
-  'alley', 'street view', 'rooftop', 'window view', 'balcony view',
-  'dawn', 'dusk', 'twilight', 'moonlight', 'midnight', 'golden hour',
-  'in the dark', 'at night', 'in the rain', 'in the sky', 'in the distance'
-];
-
-const SUBJECT_KEYWORDS = [
-  'dog', 'cat', 'wolf', 'tiger', 'lion', 'dragon', 'snake', 'cobra', 'eagle',
-  'hawk', 'raven', 'skull', 'skeleton', 'reaper', 'samurai', 'ninja', 'ronin',
-  'knight', 'warrior', 'robot', 'cyborg', 'mecha', 'demon', 'oni', 'angel',
-  'statue', 'car', 'motorcycle', 'astronaut', 'alien', 'monster', 'bear',
-  'panda', 'fox', 'kitsune', 'shark', 'octopus', 'phoenix', 'ramen', 'sword',
-  'katana', 'rose', 'flower', 'lotus', 'mask', 'helmet', 'character', 'mascot'
-];
-
-const TYPOGRAPHIC_KEYWORDS = [
-  'font', 'text', 'letter', 'lettering', 'typography', 'quote', 'saying',
-  'word', 'words', 'slogan', 'write', 'written', 'calligraphy', 'script',
-  'gothic letters', 'retro font', 'bold text', 'graffiti text', 'neon text',
-  'in gothic', 'in cursive', 'handwritten', 'typeface'
-];
-
-function classifyPrompt(userPrompt) {
-  const lower = userPrompt.toLowerCase();
-
-  for (const kw of TYPOGRAPHIC_KEYWORDS) {
-    if (lower.includes(kw)) return 'TYPOGRAPHIC';
-  }
-
-  let sceneScore = 0;
-  for (const kw of SCENE_KEYWORDS) {
-    if (lower.includes(kw)) sceneScore++;
-  }
-
-  let subjectScore = 0;
-  for (const kw of SUBJECT_KEYWORDS) {
-    if (lower.includes(kw)) subjectScore++;
-  }
-
-  if (sceneScore >= 1 && subjectScore === 0) return 'SCENE';
-
-  return 'SUBJECT';
-}
-
-// ============================================================================
-// STAGE 2: ART DIRECTOR PROMPT BUILDER (#808080 Mid-Gray Background)
-// ============================================================================
-function buildArtDirectorPrompt(userPrompt, category) {
-  const clean = userPrompt
+async function buildArtDirectorPrompt(rawPrompt) {
+  const cleanUserPrompt = rawPrompt
     .replace(/\b(t-shirt|tshirt|shirt|hoodie|mockup|mannequin|apparel)\b/gi, '')
     .trim();
 
-  switch (category) {
-    case 'SUBJECT':
-      return {
-        prompt: `${clean}, highly detailed digital illustration, streetwear graphic art style, dynamic pose, organic irregular silhouette, floating in empty space, sharp clean edges, rich vibrant colors, professional vector quality, isolated on a flat uniform solid #808080 neutral gray background`,
-        category: 'SUBJECT'
-      };
-
-    case 'SCENE':
-      return {
-        prompt: `${clean}, epic widescreen panoramic composition rendered as a detailed graphic illustration, horizontal band artwork, dramatic cinematic lighting, rich saturated colors, painterly style, artwork edges dissolve and fade softly into flat uniform solid pure black, soft painterly edge fade, vignette dissolve into black at all borders, on a flat uniform solid pure black background #000000`,
-        category: 'SCENE'
-      };
-
-    case 'TYPOGRAPHIC':
-      return {
-        prompt: `${clean}, bold custom typography, graphic lettering design, decorative text composition, streetwear fashion typography, clean readable letters, sharp edges, professional quality, isolated on a flat uniform solid #808080 neutral gray background`,
-        category: 'TYPOGRAPHIC'
-      };
-
-    default:
-      return {
-        prompt: `${clean}, detailed digital illustration, streetwear graphic art style, organic irregular silhouette, floating in empty space, isolated on a flat uniform solid #808080 neutral gray background`,
-        category: 'SUBJECT'
-      };
+  const groqKey = process.env.GROQ_API_KEY?.trim();
+  if (!groqKey) {
+    throw new Error('Valid GROQ_API_KEY is missing from .env');
   }
-}
 
-// ============================================================================
-// STAGE 3: 100% HUGGING FACE GENERATION (Flux Primary -> SDXL Fallback)
-// ============================================================================
-async function generateWithHuggingFace(engineeredPrompt, modelEndpoint) {
-  const HF_TOKEN = process.env.HUGGINGFACE_KEY?.trim();
-  const API_URL = `https://router.huggingface.co/hf-inference/models/${modelEndpoint}`;
+  const systemPrompt = `You are a Principal Art Director for a premium streetwear brand.
+Convert the user's raw input into a JSON object with "category" and a single detailed diffusion prompt (under 50 words).
+
+CATEGORIES:
+1. "TYPOGRAPHIC": If the user wants words/letters/slogans.
+   - Extract the EXACT words intended, discarding conversational filler like "text that has", "print", "write".
+   - Wrap the exact words in double quotes.
+   - Format: 'Streetwear graphic typography displaying the text "[EXACT_TEXT]", bold collegiate varsity lettering, clean sharp vector letterforms, high contrast, solid opaque fills, floating freely with empty space between letters, no solid background slab, no grunge box behind text, isolated on a flat uniform solid #808080 neutral gray background'
+
+2. "SCENE": If the user describes landscapes, sunrises, sunsets, nature, or city skylines.
+   - NEVER use words like "widescreen", "panoramic", or "horizontal band" (these cause black letterbox bars).
+   - Format: 'Stylized streetwear landscape graphic illustration of [concept], dramatic lighting, rich saturated colors, self-contained organic mountain and skyline composition with clean outer edges, no letterbox bars, isolated on a flat uniform solid #808080 neutral gray background'
+
+3. "SUBJECT": For characters, animals, mascots, objects.
+   - Format: '[concept], highly detailed digital illustration, streetwear graphic art style, dynamic pose, organic irregular silhouette floating in empty space, sharp clean edges, rich vibrant colors, isolated on a flat uniform solid #808080 neutral gray background'
+
+Output ONLY valid JSON: {"category": "SUBJECT" | "SCENE" | "TYPOGRAPHIC", "prompt": "..."}`;
 
   const response = await axios.post(
-    API_URL,
-    { inputs: engineeredPrompt },
+    'https://api.groq.com/openai/v1/chat/completions',
+    {
+      model: 'openai/gpt-oss-20b',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: cleanUserPrompt }
+      ],
+      response_format: { type: 'json_object' }
+    },
     {
       headers: {
-        'Authorization': `Bearer ${HF_TOKEN}`,
-        'Content-Type': 'application/json',
-        'Accept': 'image/png'
-      },
-      responseType: 'arraybuffer',
-      timeout: 120000,
+        'Authorization': `Bearer ${groqKey}`,
+        'Content-Type': 'application/json'
+      }
     }
   );
 
-  return Buffer.from(response.data);
-}
-
-async function generateImage(engineeredPrompt) {
-  // Try Primary Model: FLUX.1-schnell (Best for text and streetwear graphics)
-  try {
-    console.log('   → Trying Primary: Hugging Face FLUX.1-schnell...');
-    const buffer = await generateWithHuggingFace(engineeredPrompt, 'black-forest-labs/FLUX.1-schnell');
-    console.log('   ✓ FLUX.1-schnell succeeded');
-    return buffer;
-  } catch (hfError) {
-    const status = hfError.response?.status;
-    console.log(`   ⚠ FLUX failed (${status || 'network'}). Switching to Fallback...`);
-
-    if (status === 503) {
-      console.log('   ⏳ FLUX model cold-starting, waiting 10 seconds...');
-      await new Promise(r => setTimeout(r, 10000));
-    }
-  }
-
-  // Try Fallback Model: SDXL (Rock solid, highly reliable architecture)
-  console.log('   → Trying Fallback: Hugging Face SDXL...');
-  const buffer = await generateWithHuggingFace(engineeredPrompt, 'stabilityai/stable-diffusion-xl-base-1.0');
-  console.log('   ✓ SDXL succeeded');
-  return buffer;
+  return JSON.parse(response.data.choices[0].message.content);
 }
 
 // ============================================================================
-// STAGES 5-6: ALPHA DECONTAMINATION + BFS INTERIOR LOCK + FEATHERING
+// STAGE 3: CLOUDFLARE WORKERS AI (FLUX.1-schnell)
 // ============================================================================
-function decontaminateAndLockAlpha(rawPixels, alphaPixels, width, height) {
-  const output = new Uint8Array(rawPixels.length);
+async function generateWithCloudflare(engineeredPrompt) {
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN?.trim();
 
-  const BG_R = rawPixels[0] || 128;
-  const BG_G = rawPixels[1] || 128;
-  const BG_B = rawPixels[2] || 128;
-
-  // Pass 1: Un-premultiply edge color correction
-  for (let i = 0; i < width * height; i++) {
-    const idx = i * 4;
-    const neuralAlpha = alphaPixels[idx + 3];
-
-    if (neuralAlpha === 0) {
-      output[idx] = 0; output[idx + 1] = 0; output[idx + 2] = 0; output[idx + 3] = 0;
-    } else if (neuralAlpha === 255) {
-      output[idx] = rawPixels[idx]; output[idx + 1] = rawPixels[idx + 1]; output[idx + 2] = rawPixels[idx + 2]; output[idx + 3] = 255;
-    } else {
-      const a = neuralAlpha / 255.0;
-      const oneMinusA = 1.0 - a;
-
-      output[idx] = Math.min(255, Math.max(0, Math.round((rawPixels[idx] - BG_R * oneMinusA) / a)));
-      output[idx + 1] = Math.min(255, Math.max(0, Math.round((rawPixels[idx + 1] - BG_G * oneMinusA) / a)));
-      output[idx + 2] = Math.min(255, Math.max(0, Math.round((rawPixels[idx + 2] - BG_B * oneMinusA) / a)));
-      output[idx + 3] = neuralAlpha;
-    }
+  if (!accountId || !apiToken) {
+    throw new Error('Valid Cloudflare credentials missing from .env');
   }
 
-  // Pass 2: 8-connected BFS
-  const isExterior = new Uint8Array(width * height);
-  const queue = new Int32Array(width * height);
-  let head = 0, tail = 0;
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`;
 
-  const tryEnqueue = (x, y) => {
-    const pos = y * width + x;
-    if (!isExterior[pos] && alphaPixels[pos * 4 + 3] < 128) {
-      isExterior[pos] = 1; queue[tail++] = pos;
-    }
-  };
-
-  for (let x = 0; x < width; x++) { tryEnqueue(x, 0); tryEnqueue(x, height - 1); }
-  for (let y = 0; y < height; y++) { tryEnqueue(0, y); tryEnqueue(width - 1, y); }
-
-  while (head < tail) {
-    const pos = queue[head++];
-    const x = pos % width;
-    const y = (pos - x) / width;
-
-    if (x > 0) tryEnqueue(x - 1, y);
-    if (x < width - 1) tryEnqueue(x + 1, y);
-    if (y > 0) tryEnqueue(x, y - 1);
-    if (y < height - 1) tryEnqueue(x, y + 1);
-    if (x > 0 && y > 0) tryEnqueue(x - 1, y - 1);
-    if (x < width - 1 && y > 0) tryEnqueue(x + 1, y - 1);
-    if (x > 0 && y < height - 1) tryEnqueue(x - 1, y + 1);
-    if (x < width - 1 && y < height - 1) tryEnqueue(x + 1, y + 1);
-  }
-
-  // Pass 3: Apply lock
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = y * width + x;
-      const idx = i * 4;
-
-      if (isExterior[i]) {
-        output[idx] = 0; output[idx + 1] = 0; output[idx + 2] = 0; output[idx + 3] = 0;
-      } else {
-        const touchesExterior = (x > 0 && isExterior[i - 1]) || (x < width - 1 && isExterior[i + 1]) || (y > 0 && isExterior[i - width]) || (y < height - 1 && isExterior[i + width]);
-        if (!touchesExterior) {
-          output[idx] = rawPixels[idx]; output[idx + 1] = rawPixels[idx + 1]; output[idx + 2] = rawPixels[idx + 2]; output[idx + 3] = 255;
-        }
+  const response = await axios.post(
+    url,
+    { prompt: engineeredPrompt },
+    {
+      headers: {
+        'Authorization': `Bearer ${apiToken}`,
+        'Content-Type': 'application/json'
       }
     }
+  );
+
+  if (!response.data.success) {
+    throw new Error(JSON.stringify(response.data.errors));
   }
 
-  // Pass 4: Feathering
-  const finalOutput = new Uint8Array(output);
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const pos = y * width + x;
-      if (!isExterior[pos] && output[pos * 4 + 3] > 200) {
-        let extCount = 0;
-        extCount += isExterior[pos - 1] ? 1 : 0; extCount += isExterior[pos + 1] ? 1 : 0;
-        extCount += isExterior[pos - width] ? 1 : 0; extCount += isExterior[pos + width] ? 1 : 0;
-        extCount += isExterior[pos - width - 1] ? 1 : 0; extCount += isExterior[pos - width + 1] ? 1 : 0;
-        extCount += isExterior[pos + width - 1] ? 1 : 0; extCount += isExterior[pos + width + 1] ? 1 : 0;
-
-        if (extCount > 0) {
-          finalOutput[pos * 4 + 3] = Math.max(0, Math.round(output[pos * 4 + 3] * (1 - extCount * 0.10)));
-        }
-      }
-    }
-  }
-
-  return finalOutput;
-}
-
-// ============================================================================
-// STAGE 7: TIGHT CROP + PADDING NORMALIZATION
-// ============================================================================
-async function tightCropWithPadding(pixelData, width, height, padding = 20) {
-  let minX = width, minY = height, maxX = 0, maxY = 0;
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = (y * width + x) * 4;
-      if (pixelData[idx + 3] > 15) {
-        if (x < minX) minX = x; if (x > maxX) maxX = x;
-        if (y < minY) minY = y; if (y > maxY) maxY = y;
-      }
-    }
-  }
-
-  if (maxX < minX || maxY < minY) {
-    return sharp(Buffer.from(pixelData), { raw: { width, height, channels: 4 } }).png().toBuffer();
-  }
-
-  const cropW = maxX - minX + 1;
-  const cropH = maxY - minY + 1;
-
-  return sharp(Buffer.from(pixelData), { raw: { width, height, channels: 4 } })
-    .extract({ left: minX, top: minY, width: cropW, height: cropH })
-    .extend({ top: padding, bottom: padding, left: padding, right: padding, background: { r: 0, g: 0, b: 0, alpha: 0 } })
-    .png()
-    .toBuffer();
+  const base64Image = response.data.result.image;
+  return Buffer.from(base64Image, 'base64');
 }
 
 // ============================================================================
@@ -287,49 +96,29 @@ router.post('/generate', async (req, res) => {
   try {
     const { prompt } = req.body;
 
-    const category = classifyPrompt(prompt);
-    console.log(`\n🧠 Stage 1 — Prompt classified as: ${category}`);
+    console.log(`\n🧠 Stage 1 & 2 — Groq Art Director analyzing: "${prompt}"...`);
+    const artDirected = await buildArtDirectorPrompt(prompt);
+    
+    console.log(`   ✓ Classified as: [${artDirected.category}]`);
+    console.log(`✨ Art Director Prompt:\n   "${artDirected.prompt}"`);
 
-    const artDirected = buildArtDirectorPrompt(prompt, category);
-    console.log(`✨ Stage 2 — Art Director prompt:\n   "${artDirected.prompt}"`);
-
-    console.log('🎨 Stage 3 — Generating artwork...');
-    const rawImageBuffer = await generateImage(artDirected.prompt);
+    console.log('🎨 Stage 3 — Generating watermark-free artwork via Cloudflare Flux...');
+    const rawImageBuffer = await generateWithCloudflare(artDirected.prompt);
     console.log(`   ✓ Received ${(rawImageBuffer.length / 1024).toFixed(0)}KB image`);
 
-    // Ensure it's a PNG and wrap it in a Blob for the neural matting
+    // Ensure standard PNG format
     const normalizedPngBuffer = await sharp(rawImageBuffer).png().toBuffer();
-    const inputBlob = new Blob([normalizedPngBuffer], { type: 'image/png' });
+    const base64Image = `data:image/png;base64,${normalizedPngBuffer.toString('base64')}`;
 
-    console.log('🔬 Stage 4 — Running server-side neural background segmentation...');
-    const removeBackground = await getRemoveBackground();
-    const segmentedBlob = await removeBackground(inputBlob, {
-      model: 'medium',
-      output: { format: 'image/png', quality: 1.0 },
-    });
-    const segmentedBuffer = Buffer.from(await segmentedBlob.arrayBuffer());
-    console.log('   ✓ Neural segmentation complete');
-
-    const original = await sharp(normalizedPngBuffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-    const segmented = await sharp(segmentedBuffer).resize(original.info.width, original.info.height).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-
-    console.log('🧪 Stages 5-6 — Alpha decontamination, BFS interior lock, contour feathering...');
-    const cleanedPixels = decontaminateAndLockAlpha(original.data, segmented.data, original.info.width, original.info.height);
-    console.log('   ✓ Edge decontamination complete');
-
-    console.log('✂️ Stage 7 — Tight cropping and padding normalization...');
-    const finalPng = await tightCropWithPadding(cleanedPixels, original.info.width, original.info.height, 20);
-    
-    const base64Image = `data:image/png;base64,${finalPng.toString('base64')}`;
-
-    console.log('✅ Pipeline complete — sending clean transparent cutout to frontend.');
+    console.log('✅ Sending #808080 artwork to frontend for universal neural matting.');
     res.json({
       imageUrl: base64Image,
       category: artDirected.category,
     });
 
   } catch (error) {
-    console.error('❌ Pipeline Error:', error.message || error);
+    const errorDetails = error.response?.data ? JSON.stringify(error.response.data) : error.message;
+    console.error('❌ Pipeline Error:', errorDetails);
     res.status(500).json({ error: 'Failed to process design pipeline.' });
   }
 });

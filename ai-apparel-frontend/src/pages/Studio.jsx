@@ -8,14 +8,13 @@ export default function Studio() {
   const [isSaving, setIsSaving] = useState(false);
 
   // View & Garment State
-  const [activeView, setActiveView] = useState('front'); // 'front' | 'back'
+  const [activeView, setActiveView] = useState('front');
   const [shirtColor, setShirtColor] = useState('#18181b'); // Default: Onyx Black
 
-  // Independent Dual-Sided Design State
-  // Now stores both the image URL and the category to apply proper blending
+  // Dual-Sided State
   const [designs, setDesigns] = useState({
-    front: { url: null, category: null },
-    back: { url: null, category: null },
+    front: null,
+    back: null,
   });
 
   const brandColors = [
@@ -35,21 +34,22 @@ export default function Studio() {
       img.src = src;
     });
 
+  // ===========================================================================
+  // UNIVERSAL ALPHA DECONTAMINATION + INTERIOR LOCK + FEATHERING
+  // ===========================================================================
   const decontaminateAndLockAlpha = (rawPixels, alphaPixels, width, height) => {
     const output = new Uint8ClampedArray(rawPixels.length);
     const BG_R = rawPixels[0] || 128;
     const BG_G = rawPixels[1] || 128;
     const BG_B = rawPixels[2] || 128;
 
+    // Pass 1: Un-premultiply edge pixels
     for (let i = 0; i < width * height; i++) {
       const idx = i * 4;
       const neuralAlpha = alphaPixels[idx + 3];
 
       if (neuralAlpha === 0) {
-        output[idx] = 0;
-        output[idx + 1] = 0;
-        output[idx + 2] = 0;
-        output[idx + 3] = 0;
+        output[idx] = 0; output[idx + 1] = 0; output[idx + 2] = 0; output[idx + 3] = 0;
       } else if (neuralAlpha === 255) {
         output[idx] = rawPixels[idx];
         output[idx + 1] = rawPixels[idx + 1];
@@ -58,24 +58,21 @@ export default function Studio() {
       } else {
         const a = neuralAlpha / 255.0;
         const oneMinusA = 1.0 - a;
-        const corrR = Math.min(255, Math.max(0, Math.round((rawPixels[idx] - BG_R * oneMinusA) / a)));
-        const corrG = Math.min(255, Math.max(0, Math.round((rawPixels[idx + 1] - BG_G * oneMinusA) / a)));
-        const corrB = Math.min(255, Math.max(0, Math.round((rawPixels[idx + 2] - BG_B * oneMinusA) / a)));
-        output[idx] = corrR;
-        output[idx + 1] = corrG;
-        output[idx + 2] = corrB;
+        output[idx] = Math.min(255, Math.max(0, Math.round((rawPixels[idx] - BG_R * oneMinusA) / a)));
+        output[idx + 1] = Math.min(255, Math.max(0, Math.round((rawPixels[idx + 1] - BG_G * oneMinusA) / a)));
+        output[idx + 2] = Math.min(255, Math.max(0, Math.round((rawPixels[idx + 2] - BG_B * oneMinusA) / a)));
         output[idx + 3] = neuralAlpha;
       }
     }
 
+    // Pass 2: 8-connected BFS from outer borders
     const isExterior = new Uint8Array(width * height);
     const queue = new Int32Array(width * height);
     let head = 0, tail = 0;
-    const ALPHA_THRESHOLD = 128;
 
     const tryEnqueue = (x, y) => {
       const pos = y * width + x;
-      if (!isExterior[pos] && alphaPixels[pos * 4 + 3] < ALPHA_THRESHOLD) {
+      if (!isExterior[pos] && alphaPixels[pos * 4 + 3] < 128) {
         isExterior[pos] = 1;
         queue[tail++] = pos;
       }
@@ -98,6 +95,7 @@ export default function Studio() {
       if (x < width - 1 && y < height - 1) tryEnqueue(x + 1, y + 1);
     }
 
+    // Pass 3: Preserve interior graphics
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
@@ -105,27 +103,40 @@ export default function Studio() {
         if (isExterior[i]) {
           output[idx] = 0; output[idx + 1] = 0; output[idx + 2] = 0; output[idx + 3] = 0;
         } else {
-          const touchesExterior = (x > 0 && isExterior[i - 1]) || (x < width - 1 && isExterior[i + 1]) || (y > 0 && isExterior[i - width]) || (y < height - 1 && isExterior[i + width]);
+          const touchesExterior =
+            (x > 0 && isExterior[i - 1]) ||
+            (x < width - 1 && isExterior[i + 1]) ||
+            (y > 0 && isExterior[i - width]) ||
+            (y < height - 1 && isExterior[i + width]);
+
           if (!touchesExterior) {
-            output[idx] = rawPixels[idx]; output[idx + 1] = rawPixels[idx + 1]; output[idx + 2] = rawPixels[idx + 2]; output[idx + 3] = 255;
+            output[idx] = rawPixels[idx];
+            output[idx + 1] = rawPixels[idx + 1];
+            output[idx + 2] = rawPixels[idx + 2];
+            output[idx + 3] = 255;
           }
         }
       }
     }
 
+    // Pass 4: Outer contour feathering
     const finalOutput = new Uint8ClampedArray(output);
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
         const pos = y * width + x;
         if (!isExterior[pos] && output[pos * 4 + 3] > 200) {
           let extCount = 0;
-          extCount += isExterior[pos - 1] ? 1 : 0; extCount += isExterior[pos + 1] ? 1 : 0;
-          extCount += isExterior[pos - width] ? 1 : 0; extCount += isExterior[pos + width] ? 1 : 0;
-          extCount += isExterior[pos - width - 1] ? 1 : 0; extCount += isExterior[pos - width + 1] ? 1 : 0;
-          extCount += isExterior[pos + width - 1] ? 1 : 0; extCount += isExterior[pos + width + 1] ? 1 : 0;
+          extCount += isExterior[pos - 1] ? 1 : 0;
+          extCount += isExterior[pos + 1] ? 1 : 0;
+          extCount += isExterior[pos - width] ? 1 : 0;
+          extCount += isExterior[pos + width] ? 1 : 0;
+          extCount += isExterior[pos - width - 1] ? 1 : 0;
+          extCount += isExterior[pos - width + 1] ? 1 : 0;
+          extCount += isExterior[pos + width - 1] ? 1 : 0;
+          extCount += isExterior[pos + width + 1] ? 1 : 0;
+
           if (extCount > 0) {
-            const featheredAlpha = Math.max(0, Math.round(output[pos * 4 + 3] * (1 - extCount * 0.10)));
-            finalOutput[pos * 4 + 3] = featheredAlpha;
+            finalOutput[pos * 4 + 3] = Math.max(0, Math.round(output[pos * 4 + 3] * (1 - extCount * 0.10)));
           }
         }
       }
@@ -156,6 +167,7 @@ export default function Studio() {
       const cleanedImageData = new ImageData(cleanedPixels, w, h);
       origCtx.putImageData(cleanedImageData, 0, 0);
 
+      // Tight bounding-box crop
       let minX = w, minY = h, maxX = 0, maxY = 0;
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
@@ -169,12 +181,14 @@ export default function Studio() {
       if (maxX < minX || maxY < minY) return origCanvas.toDataURL('image/png');
 
       const padding = 20;
-      const cropX = Math.max(0, minX - padding); const cropY = Math.max(0, minY - padding);
+      const cropX = Math.max(0, minX - padding);
+      const cropY = Math.max(0, minY - padding);
       const cropW = Math.min(w - cropX, maxX - minX + 1 + padding * 2);
       const cropH = Math.min(h - cropY, maxY - minY + 1 + padding * 2);
 
       const finalCanvas = document.createElement('canvas');
-      finalCanvas.width = cropW; finalCanvas.height = cropH;
+      finalCanvas.width = cropW;
+      finalCanvas.height = cropH;
       const finalCtx = finalCanvas.getContext('2d');
       finalCtx.drawImage(origCanvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
 
@@ -187,7 +201,7 @@ export default function Studio() {
   const generateDesign = async () => {
     if (!prompt.trim()) return;
     setLoading(true);
-    setLoadingStep('Stage 1/4: Classifying prompt & generating artwork...');
+    setLoadingStep('Stage 1/3: AI Art Director & Cloudflare Flux Generation...');
 
     try {
       const response = await fetch('http://localhost:5000/api/design/generate', {
@@ -202,33 +216,22 @@ export default function Studio() {
         throw new Error(data.error || 'Failed to generate design');
       }
 
-      let finalImageUrl = data.imageUrl;
+      setLoadingStep(`Stage 2/3: Running neural alpha segmentation...`);
+      const res = await fetch(data.imageUrl);
+      const blob = await res.blob();
+      const pngBlob = new Blob([blob], { type: 'image/png' });
 
-      // Only run background removal for SUBJECT and TYPOGRAPHIC prompts
-      if (data.category !== 'SCENE') {
-        setLoadingStep(`Stage 2/4: Running neural segmentation (${data.category})...`);
-        
-        // Wrap the Base64 response in a typed Blob to prevent MIME type crashes
-        const res = await fetch(data.imageUrl);
-        const blob = await res.blob();
-        const pngBlob = new Blob([blob], { type: 'image/png' });
+      const segmentedBlob = await removeBackground(pngBlob, {
+        model: 'medium',
+        output: { format: 'image/png', quality: 1.0 },
+      });
 
-        const segmentedBlob = await removeBackground(pngBlob, {
-          model: 'medium',
-          output: { format: 'image/png', quality: 1.0 },
-        });
+      setLoadingStep('Stage 3/3: Decontaminating edges & auto-cropping...');
+      const finalImageUrl = await runClientPostProcessing(data.imageUrl, segmentedBlob);
 
-        setLoadingStep('Stage 3/4: Un-premultiplying edges & tight-cropping...');
-        finalImageUrl = await runClientPostProcessing(data.imageUrl, segmentedBlob);
-      } else {
-        // Skip processing for scenes, they will blend natively via CSS
-        setLoadingStep(`Stage 2/4: Optimizing scene rendering...`);
-      }
-
-      setLoadingStep('Stage 4/4: Rendering on garment...');
       setDesigns((prev) => ({
         ...prev,
-        [activeView]: { url: finalImageUrl, category: data.category },
+        [activeView]: finalImageUrl,
       }));
     } catch (error) {
       console.error(error);
@@ -240,7 +243,7 @@ export default function Studio() {
   };
 
   const saveToStorefront = async () => {
-    if (!designs.front.url && !designs.back.url) return;
+    if (!designs.front && !designs.back) return;
 
     setIsSaving(true);
     try {
@@ -249,8 +252,8 @@ export default function Studio() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt,
-          frontImage: designs.front.url,
-          backImage: designs.back.url,
+          frontImage: designs.front,
+          backImage: designs.back,
           color: shirtColor,
         }),
       });
@@ -269,17 +272,7 @@ export default function Studio() {
     }
   };
 
-  const currentDesign = designs[activeView];
-
-  // Dynamic CSS blending based on the shirt color and prompt category
-  const isLightShirt = shirtColor === '#f4f4f5' || shirtColor === '#e2e8f0'; // Bone or light colors
-  
-  let blendClass = "drop-shadow-md"; // Default for isolated subjects
-  if (currentDesign.category === 'SCENE') {
-    // For scenes, use Screen blend on dark shirts (makes the black background invisible)
-    // and Multiply blend on light shirts
-    blendClass = isLightShirt ? "mix-blend-multiply" : "mix-blend-screen opacity-90";
-  }
+  const currentImage = designs[activeView];
 
   return (
     <div className="max-w-5xl mx-auto p-6 mt-8">
@@ -289,8 +282,8 @@ export default function Studio() {
       </div>
 
       <div className="flex flex-col md:flex-row gap-8">
+        {/* Controls */}
         <div className="w-full md:w-1/2 space-y-6">
-          
           <div>
             <label className="block font-semibold text-gray-700 mb-2">Garment View</label>
             <div className="flex bg-gray-200 p-1 rounded-lg w-fit">
@@ -318,7 +311,7 @@ export default function Studio() {
             <textarea
               className="w-full p-4 border border-gray-300 rounded-lg shadow-sm outline-none resize-none focus:ring-2 focus:ring-gray-900"
               rows="4"
-              placeholder="e.g., sunrise in the dark, or cyberpunk samurai dog"
+              placeholder="e.g., sunrise in the dark, or Text that have IIT Dhanbad"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
             ></textarea>
@@ -351,7 +344,7 @@ export default function Studio() {
             {loading ? '🎨 Generating...' : 'Generate Design'}
           </button>
 
-          {(designs.front.url || designs.back.url) && !loading && (
+          {(designs.front || designs.back) && !loading && (
             <button
               onClick={saveToStorefront}
               disabled={isSaving}
@@ -362,8 +355,8 @@ export default function Studio() {
           )}
         </div>
 
+        {/* Kastam Studio Canvas */}
         <div className="w-full md:w-1/2 bg-neutral-100 rounded-2xl min-h-[540px] flex items-center justify-center border border-neutral-200 shadow-inner p-6 relative select-none">
-          
           {loading ? (
             <div className="flex flex-col items-center z-30 text-center px-4">
               <div className="animate-spin rounded-full h-12 w-12 border-2 border-neutral-900 border-t-transparent mb-4"></div>
@@ -372,6 +365,7 @@ export default function Studio() {
           ) : (
             <div className="relative w-full max-w-[380px] aspect-[400/460] flex items-center justify-center">
               
+              {/* Layer 1: Garment Base */}
               <div className="absolute inset-0 flex items-center justify-center">
                 <div 
                   className="absolute inset-0 transition-all duration-300"
@@ -395,6 +389,7 @@ export default function Studio() {
                 />
               </div>
 
+              {/* Layer 2: Hem Tag */}
               <div 
                 className={`absolute bottom-[10%] z-20 transition-all duration-300 pointer-events-none ${
                   activeView === 'front' ? 'right-[20%]' : 'left-[20%]'
@@ -406,6 +401,7 @@ export default function Studio() {
                 </div>
               </div>
 
+              {/* Layer 3: Print Zone */}
               <div 
                 className={`absolute z-10 flex items-center justify-center transition-all duration-300 overflow-hidden ${
                   activeView === 'front' 
@@ -413,11 +409,11 @@ export default function Studio() {
                     : 'top-[20%] left-[25%] w-[50%] h-[55%]'
                 }`}
               >
-                {currentDesign.url ? (
+                {currentImage ? (
                   <img 
-                    src={currentDesign.url} 
+                    src={currentImage} 
                     alt={`Kastam ${activeView} artwork`} 
-                    className={`w-full h-full object-contain transition-opacity duration-300 ${blendClass}`}
+                    className="w-full h-full object-contain drop-shadow-md transition-opacity duration-300"
                   />
                 ) : (
                   <div className="w-full h-full border-2 border-dashed border-neutral-400/60 rounded-lg flex flex-col items-center justify-center text-center p-3 bg-white/10 backdrop-blur-[1px] transition-colors hover:border-neutral-500">
