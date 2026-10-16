@@ -137,7 +137,7 @@ router.post('/generate', async (req, res) => {
 // ============================================================================
 router.post('/save', async (req, res) => {
   try {
-    const { prompt, frontImage, backImage, color } = req.body;
+    const { frontPrompt, backPrompt, frontImage, backImage, color, userId, userName } = req.body;
 
     if (!frontImage && !backImage) {
       return res.status(400).json({ error: 'You must generate at least one design to publish.' });
@@ -171,10 +171,13 @@ router.post('/save', async (req, res) => {
 
     console.log('💾 Saving document to MongoDB...');
     const newDesign = new Design({
-      prompt,
+      frontPrompt: frontPrompt || null,
+      backPrompt: backPrompt || null,
       shirtColor: color,
       frontImageUrl: finalFrontUrl,
-      backImageUrl: finalBackUrl
+      backImageUrl: finalBackUrl,
+      creatorId: userId || null,
+      creatorName: userName || 'Anonymous'
     });
 
     await newDesign.save();
@@ -193,11 +196,67 @@ router.post('/save', async (req, res) => {
 // ============================================================================
 router.get('/all', async (req, res) => {
   try {
-    const designs = await Design.find().sort({ createdAt: -1 });
+    const { search } = req.query;
+    let query = {};
+
+    if (search && search.trim() !== '') {
+      const safeSearch = search.trim();
+      console.log(`\n🔍 Storefront Search Triggered for: "${safeSearch}"`);
+      
+      // Native JavaScript RegExp (bypasses MongoDB $regex null-crashing bugs)
+      const searchRegex = new RegExp(safeSearch, 'i');
+      
+      query = {
+        $or: [
+          { prompt: searchRegex },
+          { frontPrompt: searchRegex },
+          { backPrompt: searchRegex },
+          { creatorName: searchRegex }
+        ]
+      };
+    } else {
+      console.log('\n📦 Fetching all designs (No search filter applied)');
+    }
+
+    const designs = await Design.find(query).sort({ createdAt: -1 });
     res.json(designs);
   } catch (error) {
     console.error('❌ Fetch Error:', error);
     res.status(500).json({ error: 'Failed to fetch storefront designs.' });
+  }
+});
+
+// ============================================================================
+// ENDPOINT: FETCH USER'S PRIVATE WARDROBE (/user/:userId)
+// ============================================================================
+router.get('/user/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { search } = req.query;
+    
+    // Always filter by the specific user's ID
+    let query = { creatorId: userId };
+
+    if (search) {
+      // Use $and to ensure it only searches WITHIN this user's designs
+      query = {
+        $and: [
+          { creatorId: userId },
+          {
+            $or: [
+              { frontPrompt: { $regex: search, $options: 'i' } },
+              { backPrompt: { $regex: search, $options: 'i' } }
+            ]
+          }
+        ]
+      };
+    }
+
+    const userDesigns = await Design.find(query).sort({ createdAt: -1 });
+    res.json(userDesigns);
+  } catch (error) {
+    console.error('❌ Wardrobe Fetch Error:', error);
+    res.status(500).json({ error: 'Failed to fetch user wardrobe.' });
   }
 });
 

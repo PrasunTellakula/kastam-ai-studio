@@ -1,21 +1,46 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { removeBackground } from '@imgly/background-removal';
+import * as htmlToImage from 'html-to-image';
+
+const getSavedState = () => {
+  try {
+    const saved = localStorage.getItem('kastam_studio_state');
+    return saved ? JSON.parse(saved) : null;
+  } catch (e) {
+    return null;
+  }
+};
 
 export default function Studio() {
-  const [prompt, setPrompt] = useState('');
+  const savedState = getSavedState();
+
+  const [prompts, setPrompts] = useState(savedState?.prompts || { front: '', back: '' });
+  const [shirtColor, setShirtColor] = useState(savedState?.shirtColor || '#18181b');
+  const [designs, setDesigns] = useState(savedState?.designs || {
+    front: { url: null, category: null },
+    back: { url: null, category: null },
+  });
+
   const [loading, setLoading] = useState(false);
   const [loadingStep, setLoadingStep] = useState('');
   const [isSaving, setIsSaving] = useState(false);
-
-  // View & Garment State
   const [activeView, setActiveView] = useState('front');
-  const [shirtColor, setShirtColor] = useState('#18181b'); // Default: Onyx Black
 
-  // Dual-Sided State
-  const [designs, setDesigns] = useState({
-    front: null,
-    back: null,
-  });
+  // DOM Reference for the Mockup Exporter
+  const mockupRef = useRef(null);
+
+  const activePrompt = prompts[activeView] || '';
+
+  const handlePromptChange = (val) => {
+    setPrompts((prev) => ({ ...prev, [activeView]: val }));
+  };
+
+  useEffect(() => {
+    if (!loading) {
+      const stateToSave = { prompts, shirtColor, designs };
+      localStorage.setItem('kastam_studio_state', JSON.stringify(stateToSave));
+    }
+  }, [prompts, shirtColor, designs, loading]);
 
   const brandColors = [
     { name: 'Onyx', hex: '#18181b' },
@@ -43,7 +68,6 @@ export default function Studio() {
     const BG_G = rawPixels[1] || 128;
     const BG_B = rawPixels[2] || 128;
 
-    // Pass 1: Un-premultiply edge pixels
     for (let i = 0; i < width * height; i++) {
       const idx = i * 4;
       const neuralAlpha = alphaPixels[idx + 3];
@@ -65,7 +89,6 @@ export default function Studio() {
       }
     }
 
-    // Pass 2: 8-connected BFS from outer borders
     const isExterior = new Uint8Array(width * height);
     const queue = new Int32Array(width * height);
     let head = 0, tail = 0;
@@ -95,7 +118,6 @@ export default function Studio() {
       if (x < width - 1 && y < height - 1) tryEnqueue(x + 1, y + 1);
     }
 
-    // Pass 3: Preserve interior graphics
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
@@ -119,7 +141,6 @@ export default function Studio() {
       }
     }
 
-    // Pass 4: Outer contour feathering
     const finalOutput = new Uint8ClampedArray(output);
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
@@ -167,7 +188,6 @@ export default function Studio() {
       const cleanedImageData = new ImageData(cleanedPixels, w, h);
       origCtx.putImageData(cleanedImageData, 0, 0);
 
-      // Tight bounding-box crop
       let minX = w, minY = h, maxX = 0, maxY = 0;
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
@@ -199,7 +219,7 @@ export default function Studio() {
   };
 
   const generateDesign = async () => {
-    if (!prompt.trim()) return;
+    if (!activePrompt.trim()) return;
     setLoading(true);
     setLoadingStep('Stage 1/3: AI Art Director & Cloudflare Flux Generation...');
 
@@ -207,7 +227,7 @@ export default function Studio() {
       const response = await fetch('http://localhost:5000/api/design/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt: activePrompt }),
       });
 
       const data = await response.json();
@@ -231,7 +251,7 @@ export default function Studio() {
 
       setDesigns((prev) => ({
         ...prev,
-        [activeView]: finalImageUrl,
+        [activeView]: { url: finalImageUrl, category: data.category },
       }));
     } catch (error) {
       console.error(error);
@@ -242,8 +262,35 @@ export default function Studio() {
     }
   };
 
+  // ===========================================================================
+  // DOWNLOAD MOCKUP (Client-Side DOM Rasterization)
+  // ===========================================================================
+  const handleDownloadMockup = async () => {
+    if (!mockupRef.current) return;
+    
+    try {
+      // pixelRatio: 2 ensures the exported image is high-definition (Retina quality)
+      const dataUrl = await htmlToImage.toJpeg(mockupRef.current, { 
+        quality: 0.95,
+        pixelRatio: 2 
+      });
+      
+      const link = document.createElement('a');
+      link.download = `kastam-${activeView}-mockup.jpg`;
+      link.href = dataUrl;
+      link.click();
+    } catch (error) {
+      console.error('Failed to download mockup', error);
+      alert('Failed to generate mockup image.');
+    }
+  };
+
   const saveToStorefront = async () => {
-    if (!designs.front && !designs.back) return;
+    if (!designs.front?.url && !designs.back?.url) return;
+
+    // Grab the user safely from localStorage
+    const savedUser = localStorage.getItem('kastam_user');
+    const user = savedUser ? JSON.parse(savedUser) : null;
 
     setIsSaving(true);
     try {
@@ -251,10 +298,13 @@ export default function Studio() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt,
-          frontImage: designs.front,
-          backImage: designs.back,
+          frontPrompt: prompts.front,
+          backPrompt: prompts.back,
+          frontImage: designs.front?.url || null,
+          backImage: designs.back?.url || null,
           color: shirtColor,
+          userId: user?.id || null,
+          userName: user?.name || null
         }),
       });
 
@@ -272,7 +322,13 @@ export default function Studio() {
     }
   };
 
-  const currentImage = designs[activeView];
+  const currentDesign = designs[activeView];
+  const isLightShirt = shirtColor === '#f4f4f5' || shirtColor === '#e2e8f0'; 
+  
+  let blendClass = "drop-shadow-md"; 
+  if (currentDesign?.category === 'SCENE') {
+    blendClass = isLightShirt ? "mix-blend-multiply" : "mix-blend-screen opacity-90";
+  }
 
   return (
     <div className="max-w-5xl mx-auto p-6 mt-8">
@@ -282,10 +338,32 @@ export default function Studio() {
       </div>
 
       <div className="flex flex-col md:flex-row gap-8">
-        {/* Controls */}
+        {/* LEFT SIDE: Controls */}
         <div className="w-full md:w-1/2 space-y-6">
+          
           <div>
-            <label className="block font-semibold text-gray-700 mb-2">Garment View</label>
+            <div className="flex justify-between items-center mb-2">
+              <label className="block font-semibold text-gray-700">Garment View</label>
+              <button 
+                onClick={() => {
+                  if(window.confirm('Clear all designs and start fresh?')) {
+                    // Instantly wipe all React state variables
+                    setPrompts({ front: '', back: '' });
+                    setDesigns({
+                      front: { url: null, category: null },
+                      back: { url: null, category: null },
+                    });
+                    setShirtColor('#18181b');
+                    
+                    // Wipe the browser memory
+                    localStorage.removeItem('kastam_studio_state');
+                  }
+                }}
+                className="text-xs text-red-500 hover:text-red-700 font-bold transition-colors"
+              >
+                Clear Canvas
+              </button>
+            </div>
             <div className="flex bg-gray-200 p-1 rounded-lg w-fit">
               <button
                 onClick={() => setActiveView('front')}
@@ -311,9 +389,13 @@ export default function Studio() {
             <textarea
               className="w-full p-4 border border-gray-300 rounded-lg shadow-sm outline-none resize-none focus:ring-2 focus:ring-gray-900"
               rows="4"
-              placeholder="e.g., sunrise in the dark, or Text that have IIT Dhanbad"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
+              placeholder={
+                activeView === 'front'
+                  ? "Front chest design (e.g., minimalist samurai dog logo)"
+                  : "Full back design (e.g., sunrise from mountains)"
+              }
+              value={activePrompt}
+              onChange={(e) => handlePromptChange(e.target.value)}
             ></textarea>
           </div>
           
@@ -338,34 +420,45 @@ export default function Studio() {
           
           <button
             onClick={generateDesign}
-            disabled={loading || !prompt.trim()}
+            disabled={loading || !activePrompt.trim()}
             className="w-full bg-gray-900 text-white font-bold py-4 rounded-lg hover:bg-gray-800 disabled:bg-gray-400 shadow-md"
           >
             {loading ? '🎨 Generating...' : 'Generate Design'}
           </button>
 
-          {(designs.front || designs.back) && !loading && (
-            <button
-              onClick={saveToStorefront}
-              disabled={isSaving}
-              className="w-full bg-green-600 text-white font-bold py-4 rounded-lg hover:bg-green-700 disabled:bg-green-400 shadow-md"
-            >
-              {isSaving ? '☁️ Uploading & Saving...' : '🛒 Publish to Storefront'}
-            </button>
+          {(designs.front?.url || designs.back?.url) && !loading && (
+            <div className="flex gap-4">
+              <button
+                onClick={handleDownloadMockup}
+                className="flex-1 bg-white text-neutral-900 border-2 border-neutral-200 font-bold py-4 rounded-lg hover:border-neutral-900 transition-all flex items-center justify-center gap-2 shadow-sm"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                Download Mockup
+              </button>
+              <button
+                onClick={saveToStorefront}
+                disabled={isSaving}
+                className="flex-1 bg-green-600 text-white font-bold py-4 rounded-lg hover:bg-green-700 disabled:bg-green-400 shadow-md flex items-center justify-center gap-2"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"></path></svg>
+                {isSaving ? 'Saving...' : 'Publish'}
+              </button>
+            </div>
           )}
         </div>
 
-        {/* Kastam Studio Canvas */}
+        {/* RIGHT SIDE: Kastam Studio Canvas */}
         <div className="w-full md:w-1/2 bg-neutral-100 rounded-2xl min-h-[540px] flex items-center justify-center border border-neutral-200 shadow-inner p-6 relative select-none">
+          
           {loading ? (
             <div className="flex flex-col items-center z-30 text-center px-4">
               <div className="animate-spin rounded-full h-12 w-12 border-2 border-neutral-900 border-t-transparent mb-4"></div>
               <p className="text-neutral-700 font-mono text-xs tracking-wide">{loadingStep}</p>
             </div>
           ) : (
-            <div className="relative w-full max-w-[380px] aspect-[400/460] flex items-center justify-center">
+            // ATTACH THE MOCKUP REF HERE TO CAPTURE THIS EXACT DIV
+            <div ref={mockupRef} className="relative w-full max-w-[380px] aspect-[400/460] flex items-center justify-center bg-neutral-100">
               
-              {/* Layer 1: Garment Base */}
               <div className="absolute inset-0 flex items-center justify-center">
                 <div 
                   className="absolute inset-0 transition-all duration-300"
@@ -389,7 +482,6 @@ export default function Studio() {
                 />
               </div>
 
-              {/* Layer 2: Hem Tag */}
               <div 
                 className={`absolute bottom-[10%] z-20 transition-all duration-300 pointer-events-none ${
                   activeView === 'front' ? 'right-[20%]' : 'left-[20%]'
@@ -401,19 +493,18 @@ export default function Studio() {
                 </div>
               </div>
 
-              {/* Layer 3: Print Zone */}
               <div 
                 className={`absolute z-10 flex items-center justify-center transition-all duration-300 overflow-hidden ${
                   activeView === 'front' 
                     ? 'top-[28%] left-[30%] w-[40%] h-[40%]'
-                    : 'top-[20%] left-[25%] w-[50%] h-[55%]'
+                    : 'top-[18%] left-[27%] w-[46%] h-[55%] items-start pt-2'
                 }`}
               >
-                {currentImage ? (
+                {currentDesign?.url ? (
                   <img 
-                    src={currentImage} 
+                    src={currentDesign.url} 
                     alt={`Kastam ${activeView} artwork`} 
-                    className="w-full h-full object-contain drop-shadow-md transition-opacity duration-300"
+                    className={`w-full max-h-full object-contain transition-opacity duration-300 ${blendClass}`}
                   />
                 ) : (
                   <div className="w-full h-full border-2 border-dashed border-neutral-400/60 rounded-lg flex flex-col items-center justify-center text-center p-3 bg-white/10 backdrop-blur-[1px] transition-colors hover:border-neutral-500">

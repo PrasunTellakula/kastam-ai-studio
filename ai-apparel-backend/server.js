@@ -1,7 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const Design = require('./models/Design');
 require('dotenv').config();
 
 const app = express();
@@ -24,21 +23,6 @@ app.use('/api/design', (req, res, next) => {
   next();
 });
 
-// ============================================================================
-// STOREFRONT FEED ENDPOINT (Direct route registration)
-// ============================================================================
-app.get('/api/design/all', async (req, res) => {
-  try {
-    console.log('📦 Fetching published designs from MongoDB for Storefront...');
-    const designs = await Design.find().sort({ createdAt: -1 });
-    console.log(`   ✓ Found ${designs.length} published designs`);
-    res.json(designs);
-  } catch (error) {
-    console.error('❌ Storefront Fetch Error:', error);
-    res.status(500).json({ error: 'Failed to fetch storefront designs.' });
-  }
-});
-
 // Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('✅ Database Connected Successfully'))
@@ -46,10 +30,10 @@ mongoose.connect(process.env.MONGO_URI)
 
 // Import Feature Routers
 const authRoutes = require('./routes/auth');
-const designRoutes = require('./routes/design');
+const designRoutes = require('./routes/design'); 
 
 app.use('/api/auth', authRoutes);
-app.use('/api/design', designRoutes);
+app.use('/api/design', designRoutes); 
 
 // Health check route
 app.get('/', (req, res) => {
