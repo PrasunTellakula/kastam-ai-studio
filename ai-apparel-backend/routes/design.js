@@ -3,6 +3,14 @@ const axios = require('axios');
 const sharp = require('sharp');
 const cloudinary = require('cloudinary').v2;
 const Design = require('../models/Design');
+const Razorpay = require('razorpay');
+const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
+
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID?.trim(),
+  key_secret: process.env.RAZORPAY_KEY_SECRET?.trim()
+});
 require('dotenv').config();
 
 const router = express.Router();
@@ -102,7 +110,17 @@ async function generateWithCloudflare(engineeredPrompt) {
 // ============================================================================
 // ENDPOINT: GENERATE ARTWORK (/generate)
 // ============================================================================
-router.post('/generate', async (req, res) => {
+// NEW: AI Generation Rate Limiter (Max 5 requests per minute per IP)
+const generateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute window
+  max: 1, 
+  message: { error: 'Too many designs generated from this IP. Please wait 60 seconds.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Inject the limiter as middleware before the async function
+router.post('/generate', generateLimiter, async (req, res) => {
   try {
     const { prompt } = req.body;
 
@@ -237,19 +255,28 @@ router.get('/user/:userId', async (req, res) => {
     // Always filter by the specific user's ID
     let query = { creatorId: userId };
 
-    if (search) {
+    if (search && search.trim() !== '') {
+      const safeSearch = search.trim();
+      console.log(`\n🔍 Wardrobe Search Triggered for: "${safeSearch}"`);
+      
+      // Native JavaScript RegExp bypasses MongoDB null-crashing bugs
+      const searchRegex = new RegExp(safeSearch, 'i');
+
       // Use $and to ensure it only searches WITHIN this user's designs
       query = {
         $and: [
           { creatorId: userId },
           {
             $or: [
-              { frontPrompt: { $regex: search, $options: 'i' } },
-              { backPrompt: { $regex: search, $options: 'i' } }
+              { prompt: searchRegex },
+              { frontPrompt: searchRegex },
+              { backPrompt: searchRegex }
             ]
           }
         ]
       };
+    } else {
+      console.log(`\n📦 Fetching entire wardrobe for user: ${userId}`);
     }
 
     const userDesigns = await Design.find(query).sort({ createdAt: -1 });
@@ -257,6 +284,124 @@ router.get('/user/:userId', async (req, res) => {
   } catch (error) {
     console.error('❌ Wardrobe Fetch Error:', error);
     res.status(500).json({ error: 'Failed to fetch user wardrobe.' });
+  }
+});
+
+// ============================================================================
+// ENDPOINT: DELETE A DESIGN (/delete/:id)
+// ============================================================================
+router.delete('/delete/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log(`\n🗑️ [DELETE ROUTE CONNECTED] Attempting to delete design ID: ${id}`);
+    
+    // Find the design and delete it
+    const deletedDesign = await Design.findByIdAndDelete(id);
+    
+    if (!deletedDesign) {
+      console.log(`   ❌ Failed: Design ${id} not found in MongoDB.`);
+      return res.status(404).json({ error: 'Design not found.' });
+    }
+
+    console.log(`   ✅ Successfully deleted design: ${id}`);
+    res.json({ message: 'Design successfully deleted.' });
+  } catch (error) {
+    console.error('❌ Delete Error:', error);
+    res.status(500).json({ error: 'Failed to delete design.' });
+  }
+});
+
+// ============================================================================
+// ENDPOINT: CREATE PAYMENT ORDER (/order/create)
+// ============================================================================
+router.post('/order/create', async (req, res) => {
+  try {
+    const { material, designId, buyerId, useCredits } = req.body;
+
+    const baseCost = material === 'premium' ? 700 : 500;
+    const retailPrice = material === 'premium' ? 999 : 799;
+    let finalPayable = retailPrice;
+    let creditsApplied = 0;
+
+    // RULE 1: THE HARD FLOOR. Max discount allowed protects base manufacturing cost.
+    const maxDiscountAllowed = retailPrice - baseCost;
+
+    if (useCredits && buyerId) {
+      const User = require('../models/User');
+      const buyer = await User.findById(buyerId);
+      
+      if (buyer && buyer.publishCredits > 0) {
+        creditsApplied = Math.min(buyer.publishCredits, maxDiscountAllowed);
+        finalPayable = retailPrice - creditsApplied;
+      }
+    }
+
+    const options = {
+      amount: finalPayable * 100, // Razorpay expects paise
+      currency: 'INR',
+      receipt: `receipt_${Date.now()}`,
+      notes: { 
+        designId, 
+        buyerId: buyerId || 'guest',
+        creditsApplied: creditsApplied.toString()
+      } 
+    };
+
+    const order = await razorpay.orders.create(options);
+    res.json(order);
+  } catch (error) {
+    console.error('❌ Razorpay Order Error:', error);
+    res.status(500).json({ error: 'Payment gateway failed.' });
+  }
+});
+
+// ============================================================================
+// ENDPOINT: VERIFY PAYMENT & DISTRIBUTE ROYALTIES (/order/verify)
+// ============================================================================
+router.post('/order/verify', async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, designId, buyerId, creditsApplied } = req.body;
+
+    const secret = process.env.RAZORPAY_KEY_SECRET;
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    
+    const expectedSignature = crypto.createHmac('sha256', secret).update(body.toString()).digest('hex');
+
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({ error: 'Transaction manipulated.' });
+    }
+
+    const User = require('../models/User'); 
+    const appliedCreditValue = parseInt(creditsApplied) || 0;
+
+    // 1. Deduct the used credits from the Buyer's wallet
+    if (appliedCreditValue > 0 && buyerId && buyerId !== 'guest') {
+      await User.findByIdAndUpdate(buyerId, {
+        $inc: { publishCredits: -appliedCreditValue }
+      });
+    }
+
+    // 2. Add royalties to the Creator
+    const design = await Design.findById(designId);
+    if (design && design.creatorId) {
+      // RULE 2: NO DOUBLE DIPPING. Scale down the new minted royalty based on credits used.
+      const standardMarkup = 299; 
+      const cashPaidForMarkup = Math.max(0, standardMarkup - appliedCreditValue);
+      const royaltyRatio = cashPaidForMarkup / standardMarkup;
+      
+      const effectiveRoyalty = Math.round(150 * royaltyRatio);
+
+      if (effectiveRoyalty > 0) {
+        await User.findByIdAndUpdate(design.creatorId, {
+          $inc: { publishCredits: effectiveRoyalty }
+        });
+      }
+    }
+
+    res.json({ message: 'Payment verified and ledgers updated!' });
+  } catch (error) {
+    console.error('❌ Verification Error:', error);
+    res.status(500).json({ error: 'Failed to verify payment.' });
   }
 });
 

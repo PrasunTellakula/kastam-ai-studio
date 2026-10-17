@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer'); // <-- NEW IMPORT
+const rateLimit = require('express-rate-limit');
 const User = require('../models/User');
 
 const router = express.Router();
@@ -13,6 +14,13 @@ const transporter = nodemailer.createTransport({
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
   }
+});
+
+// Auth Rate Limiter (Max 10 attempts per 15 minutes)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,
+  message: { error: 'Too many login attempts from this IP, please try again after 15 minutes.' }
 });
 
 // 1. REGISTER A NEW USER
@@ -74,9 +82,26 @@ router.post('/login', async (req, res) => {
 
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
 
-    res.json({ token, user: { id: user._id, name: user.name, email: user.email } });
+    res.json({ token, user: { id: user._id, name: user.name, email: user.email, publishCredits: user.publishCredits || 0 } });
   } catch (err) {
     res.status(500).json({ error: 'Server error during login' });
+  }
+});
+
+// 3. FETCH LIVE USER PROFILE
+router.get('/user/:id', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-password');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    
+    res.json({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      publishCredits: user.publishCredits || 0
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
