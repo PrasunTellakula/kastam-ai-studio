@@ -87,7 +87,7 @@ export default function Home() {
 
   const handlePayment = async () => {
     try {
-      const orderRes = await fetch('${import.meta.env.VITE_API_URL}/api/design/order/create', {
+      const orderRes = await fetch(`${import.meta.env.VITE_API_URL}/api/design/order/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -109,7 +109,7 @@ export default function Home() {
         description: `Order for: "${selectedDesign.frontPrompt || selectedDesign.prompt}"`,
         order_id: order.id,
         handler: async function (response) {
-          const verifyRes = await fetch('${import.meta.env.VITE_API_URL}/api/design/order/verify', {
+          const verifyRes = await fetch(`${import.meta.env.VITE_API_URL}/api/design/order/verify`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
