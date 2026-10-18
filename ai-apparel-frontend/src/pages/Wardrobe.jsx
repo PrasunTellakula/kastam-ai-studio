@@ -144,14 +144,21 @@ export default function Wardrobe() {
             <div className="animate-spin rounded-full h-10 w-10 border-4 border-gray-900 border-t-transparent"></div>
           </div>
         ) : (
-          <div className="columns-1 sm:columns-2 md:columns-3 lg:columns-4 gap-6 space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
             {designs.map((design) => {
               const isLightShirt = design.shirtColor === '#f4f4f5' || design.shirtColor === '#e2e8f0';
               let blendClass = "drop-shadow-md"; 
               if (design.category === 'SCENE') {
                 blendClass = isLightShirt ? "mix-blend-multiply" : "mix-blend-screen opacity-90";
               }
+              
+              // FIX: Determine which side to show on the storefront card
+              const hasFront = !!design.frontImageUrl;
               const thumbnailUrl = design.frontImageUrl || design.backImageUrl;
+              const baseShirtImg = hasFront ? '/shirt_front.png' : '/shirt_back.png';
+              const zoneClass = hasFront 
+                ? 'top-[28%] left-[30%] w-[40%] h-[40%] items-center justify-center'
+                : 'top-[18%] left-[27%] w-[46%] h-[55%] items-start justify-center pt-2';
 
               return (
                 <div 
@@ -165,14 +172,15 @@ export default function Wardrobe() {
                         className="absolute inset-0 transition-all duration-300"
                         style={{ 
                           backgroundColor: design.shirtColor || '#18181b',
-                          WebkitMaskImage: `url(/shirt_front.png)`,
-                          maskImage: `url(/shirt_front.png)`,
+                          WebkitMaskImage: `url(${baseShirtImg})`,
+                          maskImage: `url(${baseShirtImg})`,
                           WebkitMaskSize: 'contain', maskSize: 'contain', WebkitMaskRepeat: 'no-repeat', maskRepeat: 'no-repeat', WebkitMaskPosition: 'center', maskPosition: 'center'
                         }}
                       ></div>
-                      <img src="/shirt_front.png" alt="Blank Garment" className="absolute inset-0 w-full h-full object-contain mix-blend-multiply pointer-events-none" />
-                      <div className="absolute z-10 flex items-center justify-center top-[28%] left-[30%] w-[40%] h-[40%]">
-                        <img src={thumbnailUrl} alt="Artwork" className={`w-full h-full object-contain transition-transform duration-500 group-hover:scale-105 ${blendClass}`} />
+                      <img src={baseShirtImg} alt="Blank Garment" className="absolute inset-0 w-full h-full object-contain mix-blend-multiply pointer-events-none" />
+                      
+                      <div className={`absolute z-10 flex ${zoneClass}`}>
+                        <img src={thumbnailUrl} alt={design.frontPrompt || design.prompt} loading="lazy" className={`w-full max-h-full object-contain transition-transform duration-500 group-hover:scale-105 ${blendClass}`} />
                       </div>
                     </div>
                   </div>

@@ -113,7 +113,7 @@ async function generateWithCloudflare(engineeredPrompt) {
 // NEW: AI Generation Rate Limiter (Max 5 requests per minute per IP)
 const generateLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute window
-  max: 1, 
+  max: 5, 
   message: { error: 'Too many designs generated from this IP. Please wait 60 seconds.' },
   standardHeaders: true,
   legacyHeaders: false,
