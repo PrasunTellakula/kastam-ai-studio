@@ -56,8 +56,8 @@ export default function Wardrobe() {
         setSearchQuery(searchParam);
 
         const url = searchParam 
-          ? `${import.meta.env.VITE_API_URL}/api/design/all?search=${encodeURIComponent(searchParam)}`
-          : `${import.meta.env.VITE_API_URL}/api/design/all`;
+          ? `${import.meta.env.VITE_API_URL}/api/design/user/${parsedUser.id}?search=${encodeURIComponent(searchParam)}`
+          : `${import.meta.env.VITE_API_URL}/api/design/user/${parsedUser.id}`;
 
         const response = await fetch(url);
         const data = await response.json();
