@@ -294,7 +294,7 @@ export default function Studio() {
 
     try {
       const response = await fetch(
-        "http://localhost:5000/api/design/generate",
+        "${import.meta.env.VITE_API_URL}/api/design/generate",
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -369,7 +369,7 @@ export default function Studio() {
 
     setIsSaving(true);
     try {
-      const response = await fetch("http://localhost:5000/api/design/save", {
+      const response = await fetch("${import.meta.env.VITE_API_URL}/api/design/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -36,7 +36,7 @@ export default function Wardrobe() {
     // 2. NEW: Fetch LIVE user data (including real-time publishCredits)
     const fetchLiveProfile = async () => {
       try {
-        const res = await fetch(`http://localhost:5000/api/auth/user/${parsedUser.id}`);
+        const res = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/user/${parsedUser.id}`);
         const liveUser = await res.json();
         if (liveUser && !liveUser.error) {
           setUser(liveUser);
@@ -56,8 +56,8 @@ export default function Wardrobe() {
         setSearchQuery(searchParam);
 
         const url = searchParam 
-          ? `http://localhost:5000/api/design/user/${parsedUser.id}?search=${encodeURIComponent(searchParam)}`
-          : `http://localhost:5000/api/design/user/${parsedUser.id}`;
+          ? `${import.meta.env.VITE_API_URL}/api/design/all?search=${encodeURIComponent(searchParam)}`
+          : `${import.meta.env.VITE_API_URL}/api/design/all`;
 
         const response = await fetch(url);
         const data = await response.json();
@@ -101,7 +101,7 @@ export default function Wardrobe() {
       return;
     }
     try {
-      const response = await fetch(`http://localhost:5000/api/design/delete/${designId}`, { method: 'DELETE' });
+      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/design/delete/${designId}`, { method: 'DELETE' });
       if (!response.ok) throw new Error('Failed to delete design');
       setDesigns(prevDesigns => prevDesigns.filter(d => d._id !== designId));
       closeModal();
